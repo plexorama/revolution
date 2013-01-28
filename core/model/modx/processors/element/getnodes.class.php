@@ -33,14 +33,70 @@ class modElementGetNodesProcessor extends modProcessor {
         return true;
     }
 
+    public function incElementCount(&$tree, $parent, $eCount, $cCount) {
+      $category = $tree[$parent];
+      if (!$category) return;
+      $category["elementCount"] += $eCount; 
+      $category["childrenCount"] += $cCount;
+      $tree[$parent] = $category;
+      $parent = $category["parent"];
+
+      if ($parent) {
+        return $this->incElementCount($tree, $parent, $eCount, $cCount);
+      }
+      return $tree;
+    }
+
+    public function buildCategoryTree($elementType) {
+        $tree = array();
+        $elementClassKey = $this->typeMap[$elementType];
+
+
+        /* get elements in this type */
+        $c = $this->modx->newQuery('modCategory');
+        $c->select($this->modx->getSelectColumns('modCategory','modCategory'));
+        $c->select('
+            COUNT('.$this->modx->getSelectColumns($elementClassKey,$elementClassKey,'',array('id')).') AS elementCount,
+            COUNT('.$this->modx->getSelectColumns('modCategory','Children','',array('id')).') AS childrenCount
+        ');
+        $c->leftJoin($elementClassKey,$elementClassKey,$this->modx->getSelectColumns($elementClassKey,$elementClassKey,'',array('category')).' = '.$this->modx->getSelectColumns('modCategory','modCategory','',array('id')));
+        $c->leftJoin('modCategory','Children');
+        $c->sortby($this->modx->getSelectColumns('modCategory','modCategory','',array('category')),'ASC');
+        $c->groupby($this->modx->getSelectColumns('modCategory','modCategory'));
+        $categories = $this->modx->getCollection('modCategory',$c);
+
+        foreach($categories as $category) {
+			if (!$category->checkPolicy('list')) continue;
+            $tree[$category->get("id")] = array("parent" => $category->get("parent"), "elementCount" => $category->get('elementCount'), "childrenCount" => $category->get("childrenCount"));
+        }
+
+        foreach($tree as $id => $category) {
+            if ($category["parent"] > 0  && ($category["elementCount"]>0  || $category["childrenCount"] > 0)){
+                $tree = $this->incElementCount($tree, $category["parent"], $category["elementCount"], $category["childrenCount"]); 
+            }
+        }
+        return $tree;
+    }
+
     public function process() {
         $this->getActions();
         $map = $this->getMap();
+        $tree = array();
 
+        $type = $this->getProperty("type");
+		if ($type && $type !="category") { 
+            $cache_key = "mgr/processors/elements/tree.{$type}";
+            $tree = json_decode($this->modx->cacheManager->get($cache_key, $cache_options), true);
+
+      	    if (!$tree) {
+                $tree = $this->buildCategoryTree($type);
+                $this->modx->cacheManager->set( $cache_key, json_encode($tree), 0, $cache_options);
+            }
+        }
         /* load correct mode */
         switch ($map[0]) {
             case 'type': /* if in the element, but not in a category */
-                $nodes = $this->getTypeNodes($map);
+                $nodes = $this->getTypeNodes($map, $tree);
                 break;
             case 'root': /* if clicking one of the root nodes */
                 $nodes = $this->getRootNodes($map);
@@ -49,7 +105,7 @@ class modElementGetNodesProcessor extends modProcessor {
                 $nodes = $this->getCategoryNodes($map);
                 break;
             default: /* if clicking a node in a category */
-                $nodes = $this->getInCategoryNodes($map);
+                $nodes = $this->getInCategoryNodes($map, $tree);
                 break;
         }
 
@@ -254,8 +310,8 @@ class modElementGetNodesProcessor extends modProcessor {
         
         return $nodes;
     }
-    
-    public function getInCategoryNodes(array $map) {
+
+    public function getInCategoryNodes(array $map, array $tree) {
         $nodes = array();
         /* 0: type,  1: element/category  2: elID  3: catID */
         $categoryId = isset($map[3]) ? $map[3] : ($map[1] == 'category' ? $map[2] : 0);
@@ -274,7 +330,7 @@ class modElementGetNodesProcessor extends modProcessor {
         $c->groupby($this->modx->getSelectColumns('modCategory','modCategory'));
         $c->sortby($this->modx->getSelectColumns('modCategory','modCategory','',array('category')),'ASC');
         $categories = $this->modx->getCollection('modCategory',$c);
-        
+
         /* set permissions as css classes */
         $class = array('icon-category','folder');
         $types = array('template','tv','chunk','snippet','plugin');
@@ -287,15 +343,16 @@ class modElementGetNodesProcessor extends modProcessor {
         if ($this->modx->hasPermission('edit_category')) $class[] = 'peditcat';
         if ($this->modx->hasPermission('delete_category')) $class[] = 'pdelcat';
         $class = implode(' ',$class);
-        
+
         /* loop through categories */
         /** @var modCategory $category */
         foreach ($categories as $category) {
             if (!$category->checkPolicy('list')) continue;
-            if ($category->get('elementCount') <= 0) continue;
+            $elCount = $tree[$category->get("id")]["elementCount"] ;
+            if ($elCount <= 0) continue;
         
             $nodes[] = array(
-                'text' => strip_tags($category->get('category')) . ' (' . $category->get('elementCount') . ')',
+                'text' => strip_tags($category->get('category')) . ' (' . $elCount . ')',
                 'id' => 'n_'.$map[0].'_category_'.($category->get('id') != null ? $category->get('id') : 0),
                 'pk' => $category->get('id'),
                 'category' => $category->get('id'),
@@ -361,7 +418,7 @@ class modElementGetNodesProcessor extends modProcessor {
         return $nodes;
     }
     
-    public function getTypeNodes(array $map) {
+    public function getTypeNodes(array $map, array $tree) {
         $nodes = array();
         $elementType = ucfirst($map[1]);
         $elementClassKey = $this->typeMap[$map[1]];
@@ -381,7 +438,6 @@ class modElementGetNodesProcessor extends modProcessor {
         $c->sortby($this->modx->getSelectColumns('modCategory','modCategory','',array('category')),'ASC');
         $c->groupby($this->modx->getSelectColumns('modCategory','modCategory'));
         $categories = $this->modx->getCollection('modCategory',$c);
-        
         /* set permissions as css classes */
         $class = 'icon-category folder';
         $types = array('template','tv','chunk','snippet','plugin');
@@ -393,14 +449,13 @@ class modElementGetNodesProcessor extends modProcessor {
         $class .= $this->modx->hasPermission('new_category') ? ' pnewcat' : '';
         $class .= $this->modx->hasPermission('edit_category') ? ' peditcat' : '';
         $class .= $this->modx->hasPermission('delete_category') ? ' pdelcat' : '';
-        
         /* loop through categories with elements in this type */
         /** @var modCategory $category */
         foreach ($categories as $category) {
             if (!$category->checkPolicy('list')) continue;
-            $elCount = (int)$category->get('elementCount');
-            $catCount = (int)$category->get('childrenCount');
-            if ($elCount < 1 && $catCount < 1 && $category->get('id') != 0) {
+            $elCount = $tree[$category->get("id")]["elementCount"];
+
+            if ($elCount < 1  && $category->get('id') != 0) {
                 continue;
             }
             $cc = $elCount > 0 ? ' ('.$elCount.')' : '';

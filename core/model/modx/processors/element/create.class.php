@@ -117,5 +117,7 @@ abstract class modElementCreateProcessor extends modObjectCreateProcessor {
         if ($this->getProperty('clearCache')) {
             $this->modx->cacheManager->refresh();
         }
+        
+        $this->modx->cacheManager->delete("mgr/processors/elements");
     }
 }
